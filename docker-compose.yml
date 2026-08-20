@@ -1,22 +1,40 @@
-version: '3.8'
-
 services:
   app:
+    container_name: uno-mp
     build: .
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      - REDIS_URL=redis://redis:6379
-      - NODE_ENV=production
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/',response=>process.exit(response.statusCode<500?0:1)).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   redis:
-    image: "redis:alpine"
-    ports:
-      - "6379:6379"
+    container_name: uno-mp-redis
+    image: redis:8-alpine
+    restart: unless-stopped
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   redis-data:

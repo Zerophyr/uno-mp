@@ -17,6 +17,12 @@ export interface Player {
   isHost: boolean;
 }
 
+export interface PlayerSession {
+  roomId: string;
+  playerId: string;
+  sessionToken: string;
+}
+
 export interface GameState {
   roomId: string;
   status: 'Lobby' | 'Playing' | 'Finished';
@@ -28,9 +34,6 @@ export interface GameState {
   currentColor: Color;
   winnerId: string | null;
   lastPlayedCard: Card | null;
-}
-
-export interface ServerToClientEvents {
-  'game-updated': (state: GameState) => void;
-  'player-joined': (player: Player) => void;
+  canPass: boolean;
+  version: number;
 }

@@ -1,78 +1,78 @@
-# 🃏 UNO MP - Self-Hosted Multiplayer UNO
+# UNO MP
 
-A real-time multiplayer UNO game designed for both remote play and physical gatherings. This version is optimized for self-hosting using Docker Compose, Socket.io, and a local Redis instance.
+A self-hosted, real-time multiplayer UNO game for personal devices and shared displays.
 
-## 🚀 Key Features
+## Features
 
-- **📱 Mobile Hand View**: Each player sees only their cards on their personal device.
-- **📺 Optional Console Mode**: Shared game board for large screens.
-- **⚡ Real-Time Sync**: Bi-directional communication via Socket.io WebSockets.
-- **🐳 Dockerized**: Fully containerized for easy self-hosting.
-- **💾 Local State**: Persistent game state using a local Redis container.
-- **🛡️ Server-Authoritative**: All game logic runs on the Node.js server.
+- Mobile hand view: each authenticated player sees only their own cards.
+- Optional public console view for a shared display.
+- Server-authoritative rules and turn validation over Socket.IO.
+- Session recovery after a temporary disconnect.
+- Redis persistence with a rolling-safe 24-hour room lifetime.
+- Docker Compose deployment with application and Redis health checks.
 
-## 🛠️ Tech Stack
+## Stack
 
-- **Framework**: [Next.js 14/15](https://nextjs.org/)
+- **Framework**: [Next.js 16](https://nextjs.org/)
 - **Server**: Custom Node.js/Express server.
-- **Real-time**: [Socket.io](https://socket.io/)
+- **Real-time**: [Socket.IO](https://socket.io/)
 - **State Storage**: [Redis](https://redis.io/)
-- **Styling**: Tailwind CSS
+- **Styling**: Tailwind CSS 4
 - **Orchestration**: Docker Compose
 
-## 🏁 Getting Started
+## Run with Docker Compose
 
-### Prerequisites
+1. Clone the repository:
 
-- [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)
-
-### Running with Docker Compose
-
-1. **Clone the repo**:
    ```bash
-   git clone https://github.com/bizkut/uno-mp.git
+   git clone https://github.com/Zerophyr/uno-mp.git
    cd uno-mp
    ```
 
-2. **Start the containers**:
+2. Build and start the stack:
+
    ```bash
-   docker-compose up --build
+   docker compose up --build -d
    ```
 
-3. **Play!**
-   - Access the app at `http://localhost:3000`.
-   - Create a room on one device, join from others.
-   - For Console Mode, visit `http://localhost:3000/console/[ROOM_ID]`.
+3. Open `http://localhost:3000`. The console view is available at
+   `http://localhost:3000/console/ROOM_ID`.
 
-### Local Development (without Docker)
+The application container is named `uno-mp`; Redis is internal-only and named
+`uno-mp-redis`. The Compose volume retains active rooms across restarts.
 
-If you have Redis running locally:
+## Local development
 
-1. **Install dependencies**:
+With Redis listening at `redis://localhost:6379`:
+
+1. Install dependencies:
+
    ```bash
-   npm install
+   npm ci
    ```
 
-2. **Run build**:
+2. Start the development server:
+
    ```bash
-   npm run build
+   npm run dev
    ```
 
-3. **Start the server**:
-   ```bash
-   node server.js
-   ```
+Use `REDIS_URL`, `PORT`, and `HOSTNAME` to override the defaults. Run the checks
+with `npm test`, `npm run lint`, and `npm run build`.
 
-## 🚢 Deployment
+## Deployment
 
-Simply run `docker-compose up -d` on any VPS with Docker installed. Ensure port `3000` is exposed.
+Route the public hostname to container port `3000`. Do not expose Redis. Both
+services include health checks, and the app waits for Redis to become healthy.
 
-## 📜 UNO Rules Implemented
+## Implemented rules
 
 - **Matching**: Color, number, or symbol.
 - **Action Cards**: Skip, Reverse, Draw Two.
 - **Wild Cards**: Wild, Wild Draw Four.
 - **Winning**: Be the first to clear your hand.
+- **Draw flow**: Draw once, then play the drawn card or pass.
+- **UNO**: Call UNO before playing the second-to-last card or draw a penalty.
 
 ---
-*Created for fun by [bizkut](https://github.com/bizkut).*
+Originally created by [bizkut](https://github.com/bizkut).

@@ -1,125 +1,163 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { emitWithAck, SocketRequestError } from '@/lib/protocol';
+import { savePlayerSession } from '@/lib/session';
 import { getSocket } from '@/lib/socket';
+import type { PlayerSession } from '@/lib/types';
 
 export default function Home() {
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
-  useEffect(() => {
-    const socket = getSocket();
+  const enterGame = (session: PlayerSession) => {
+    savePlayerSession(session);
+    router.push(`/game/${session.roomId}`);
+  };
 
-    socket.on('room-created', ({ roomId }) => {
-        socket.emit('join-room', { roomId, playerName, isHost: true });
-    });
+  const handleCreateRoom = async () => {
+    if (!playerName.trim()) {
+      setError('Please enter your name.');
+      return;
+    }
 
-    socket.on('joined', ({ roomId, playerId }) => {
-      router.push(`/game/${roomId}?playerId=${playerId}`);
-      setLoading(false);
-    });
-
-    socket.on('error', (msg) => {
-      alert(msg);
-      setLoading(false);
-    });
-
-    return () => {
-      socket.off('room-created');
-      socket.off('joined');
-      socket.off('error');
-    };
-  }, [router, playerName]);
-
-  const handleCreateRoom = () => {
-    if (!playerName) return alert('Please enter your name');
-    setLoading(true);
-    const socket = getSocket();
-    socket.emit('create-room');
+    setPendingAction('create');
+    setError(null);
+    try {
+      const { session } = await emitWithAck<{ session: PlayerSession }>(
+        getSocket(),
+        'create-room',
+        { playerName },
+      );
+      enterGame(session);
+    } catch (requestError) {
+      setError(requestError instanceof SocketRequestError ? requestError.message : 'Unable to create the room.');
+    } finally {
+      setPendingAction(null);
+    }
   };
 
   const handleJoinRoom = async () => {
-    if (!playerName || !roomId) return alert('Please enter your name and room ID');
-    setLoading(true);
-    const socket = getSocket();
-    socket.emit('join-room', { roomId: roomId.toUpperCase(), playerName });
+    if (!playerName.trim() || !roomId.trim()) {
+      setError('Please enter your name and room code.');
+      return;
+    }
+
+    setPendingAction('join');
+    setError(null);
+    try {
+      const { session } = await emitWithAck<{ session: PlayerSession }>(
+        getSocket(),
+        'join-room',
+        { roomId, playerName },
+      );
+      enterGame(session);
+    } catch (requestError) {
+      setError(requestError instanceof SocketRequestError ? requestError.message : 'Unable to join the room.');
+    } finally {
+      setPendingAction(null);
+    }
   };
 
   const handleConsoleMode = () => {
-    if (!roomId) return alert('Please enter room ID');
-    router.push(`/console/${roomId.toUpperCase()}`);
+    const normalizedRoomId = roomId.trim().toUpperCase();
+    if (!normalizedRoomId) {
+      setError('Please enter a room code.');
+      return;
+    }
+    router.push(`/console/${normalizedRoomId}`);
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-slate-900 text-white font-sans">
-      <div className="w-full max-w-md space-y-8 bg-slate-800 p-8 rounded-2xl shadow-xl border border-slate-700">
+    <main className="flex min-h-screen flex-col items-center justify-center bg-slate-900 p-6 font-sans text-white">
+      <div className="w-full max-w-md space-y-8 rounded-2xl border border-slate-700 bg-slate-800 p-8 shadow-xl">
         <div className="text-center">
-          <h1 className="text-5xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-yellow-400 via-red-500 to-blue-500 mb-2">
+          <h1 className="mb-2 bg-gradient-to-br from-yellow-400 via-red-500 to-blue-500 bg-clip-text text-5xl font-black italic tracking-tighter text-transparent">
             UNO MP
           </h1>
-          <p className="text-slate-400 font-medium">Multiplayer Card Game</p>
+          <p className="font-medium text-slate-400">Multiplayer Card Game</p>
         </div>
 
         <div className="space-y-4">
           <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-widest text-slate-500 ml-1">Your Nickname</label>
+            <label htmlFor="player-name" className="ml-1 text-xs font-bold uppercase tracking-widest text-slate-500">
+              Your Nickname
+            </label>
             <input
+              id="player-name"
               type="text"
+              maxLength={24}
+              autoComplete="nickname"
               placeholder="e.g. Alex"
-              className="w-full p-4 bg-slate-900 border border-slate-700 rounded-xl focus:ring-2 focus:ring-red-500 outline-none transition-all placeholder:text-slate-600"
+              className="w-full rounded-xl border border-slate-700 bg-slate-900 p-4 outline-none transition-all placeholder:text-slate-600 focus:ring-2 focus:ring-red-500"
               value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
+              onChange={(event) => setPlayerName(event.target.value)}
             />
           </div>
 
-          <div className="pt-4 grid grid-cols-1 gap-3">
+          <div className="grid grid-cols-1 gap-3 pt-4">
             <button
+              type="button"
               onClick={handleCreateRoom}
-              disabled={loading}
-              className="w-full p-4 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white font-bold rounded-xl shadow-lg shadow-red-900/20 active:scale-95 transition-all disabled:opacity-50"
+              disabled={pendingAction !== null}
+              className="w-full rounded-xl bg-gradient-to-r from-red-600 to-red-500 p-4 font-bold text-white shadow-lg shadow-red-900/20 transition-all hover:from-red-500 hover:to-red-400 active:scale-95 disabled:opacity-50"
             >
-              {loading ? 'Creating...' : 'HOST NEW GAME'}
+              {pendingAction === 'create' ? 'Creating...' : 'HOST NEW GAME'}
             </button>
           </div>
 
-          <div className="relative py-4 flex items-center">
-            <div className="flex-grow border-t border-slate-700"></div>
-            <span className="flex-shrink mx-4 text-slate-500 text-xs font-bold">OR JOIN ROOM</span>
-            <div className="flex-grow border-t border-slate-700"></div>
+          <div className="relative flex items-center py-4">
+            <div className="flex-grow border-t border-slate-700" />
+            <span className="mx-4 flex-shrink text-xs font-bold text-slate-500">OR JOIN ROOM</span>
+            <div className="flex-grow border-t border-slate-700" />
           </div>
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-widest text-slate-500 ml-1">Room Code</label>
+              <label htmlFor="room-code" className="ml-1 text-xs font-bold uppercase tracking-widest text-slate-500">
+                Room Code
+              </label>
               <input
+                id="room-code"
                 type="text"
+                maxLength={6}
+                autoCapitalize="characters"
                 placeholder="ABCD12"
-                className="w-full p-4 bg-slate-900 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-600 uppercase"
+                className="w-full rounded-xl border border-slate-700 bg-slate-900 p-4 uppercase outline-none transition-all placeholder:text-slate-600 focus:ring-2 focus:ring-blue-500"
                 value={roomId}
-                onChange={(e) => setRoomId(e.target.value)}
+                onChange={(event) => setRoomId(event.target.value.toUpperCase())}
               />
             </div>
-            
+
             <div className="grid grid-cols-2 gap-3">
               <button
+                type="button"
                 onClick={handleJoinRoom}
-                disabled={loading}
-                className="p-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl active:scale-95 transition-all disabled:opacity-50"
+                disabled={pendingAction !== null}
+                className="rounded-xl bg-blue-600 p-4 font-bold text-white transition-all hover:bg-blue-500 active:scale-95 disabled:opacity-50"
               >
-                JOIN AS PLAYER
+                {pendingAction === 'join' ? 'JOINING...' : 'JOIN AS PLAYER'}
               </button>
               <button
+                type="button"
                 onClick={handleConsoleMode}
-                disabled={loading}
-                className="p-4 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded-xl active:scale-95 transition-all disabled:opacity-50"
+                disabled={pendingAction !== null}
+                className="rounded-xl bg-slate-700 p-4 font-bold text-white transition-all hover:bg-slate-600 active:scale-95 disabled:opacity-50"
               >
                 CONSOLE MODE
               </button>
             </div>
           </div>
+
+          {error && (
+            <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+              {error}
+            </p>
+          )}
         </div>
       </div>
     </main>

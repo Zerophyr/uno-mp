@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { emitWithAck, SocketRequestError } from '@/lib/protocol';
 import { savePlayerSession } from '@/lib/session';
@@ -13,6 +13,14 @@ export default function Home() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+
+  useEffect(() => {
+    const search = new URLSearchParams(window.location.search);
+    const invitedRoom = search.get('room')?.trim().toUpperCase();
+    const notice = search.get('notice');
+    if (invitedRoom) setRoomId(invitedRoom);
+    if (notice) setError(notice);
+  }, []);
 
   const enterGame = (session: PlayerSession) => {
     savePlayerSession(session);

@@ -10,6 +10,7 @@ services:
       NODE_ENV: production
       PORT: 3000
       HOSTNAME: 0.0.0.0
+      TURN_DURATION_MS: ${TURN_DURATION_MS:-15000}
     depends_on:
       redis:
         condition: service_healthy

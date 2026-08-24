@@ -15,6 +15,8 @@ export interface Player {
   handCount?: number; // Added for public state broadcasts
   hasCalledUno: boolean;
   isHost: boolean;
+  isConnected: boolean;
+  wins: number;
 }
 
 export interface PlayerSession {
@@ -26,6 +28,8 @@ export interface PlayerSession {
 export interface GameState {
   roomId: string;
   status: 'Lobby' | 'Playing' | 'Finished';
+  maxPlayers: number;
+  roundNumber: number;
   players: Player[];
   deck: Card[];
   discardPile: Card[];
@@ -35,5 +39,12 @@ export interface GameState {
   winnerId: string | null;
   lastPlayedCard: Card | null;
   canPass: boolean;
+  rematchVoteCount: number;
+  rematchVotesRequired: number;
+  hasVotedRematch: boolean;
+  canVoteRematch: boolean;
+  turnDeadlineAt: number | null;
+  turnDurationMs: number;
+  serverNow: number;
   version: number;
 }

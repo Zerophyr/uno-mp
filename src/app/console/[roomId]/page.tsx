@@ -13,11 +13,14 @@ export default function ConsolePage() {
   const [state, setState] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     const socket = getSocket();
     const handleState = (newState: GameState) => {
       setState(newState);
+      setClockOffsetMs(newState.serverNow - Date.now());
       setLoading(false);
       setError(null);
     };
@@ -43,27 +46,38 @@ export default function ConsolePage() {
     };
   }, [roomId]);
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center bg-slate-950 text-4xl font-black italic text-white animate-pulse">UNO MP</div>;
+  useEffect(() => {
+    if (state?.status !== 'Playing') return;
+    const updateClock = () => setNowMs(Date.now());
+    updateClock();
+    const timer = window.setInterval(updateClock, 250);
+    return () => window.clearInterval(timer);
+  }, [state?.status]);
+
+  if (loading) return <div className="flex min-h-screen items-center justify-center bg-slate-950 text-4xl font-black italic text-white motion-safe:animate-pulse">UNO MP</div>;
   if (!state) return <div className="flex min-h-screen items-center justify-center bg-slate-950 p-8 text-center text-white">{error || `Room ${roomId} not found`}</div>;
 
   if (state.status === 'Lobby') {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center border-[20px] border-slate-900 bg-slate-950 p-12 text-white">
-        <div className="mb-4 animate-bounce text-8xl font-black italic tracking-tighter text-red-500">UNO MP</div>
+        <div className="mb-4 text-8xl font-black italic tracking-tighter text-red-500 motion-safe:animate-bounce">UNO MP</div>
         <div className="mb-16 text-3xl font-bold uppercase tracking-[0.3em] text-slate-500">Multiplayer Console</div>
         <div className="flex flex-col items-center rounded-[4rem] border-4 border-slate-800 bg-slate-900 p-16 text-center shadow-2xl">
           <div className="mb-4 text-xl font-black uppercase tracking-widest text-slate-400">Room Code</div>
           <div className="mb-12 text-9xl font-black tracking-tighter text-white">{state.roomId}</div>
           <div className="w-full max-w-xl">
-            <h3 className="mb-8 text-2xl font-bold text-slate-500">PLAYERS JOINED ({state.players.length})</h3>
+            <h3 className="mb-8 text-2xl font-bold text-slate-500">PLAYERS JOINED ({state.players.length}/{state.maxPlayers})</h3>
             <div className="flex flex-wrap justify-center gap-4">
               {state.players.map((player) => (
-                <div key={player.id} className="rounded-3xl border-2 border-slate-700 bg-slate-800 px-8 py-4 text-2xl font-black">{player.name}</div>
+                <div key={player.id} className="rounded-3xl border-2 border-slate-700 bg-slate-800 px-8 py-4 text-2xl font-black">
+                  <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${player.isConnected ? 'bg-green-500' : 'bg-slate-500'}`} />{player.name}</div>
+                  <div className="mt-1 text-xs uppercase tracking-wider text-slate-500">{player.wins} wins</div>
+                </div>
               ))}
             </div>
           </div>
         </div>
-        <div className="mt-16 flex items-center gap-4 font-bold text-slate-600"><div className="h-3 w-3 animate-ping rounded-full bg-red-500" />LIVE SESSION ACTIVE</div>
+        <div className="mt-16 flex items-center gap-4 font-bold text-slate-600"><div className="h-3 w-3 rounded-full bg-red-500 motion-safe:animate-ping" />LIVE SESSION ACTIVE</div>
       </main>
     );
   }
@@ -75,7 +89,7 @@ export default function ConsolePage() {
       <div className="mb-8 flex items-start justify-between">
         <div>
           <div className="mb-1 text-4xl font-black italic tracking-tighter text-red-500">UNO MP</div>
-          <div className="text-sm font-black uppercase tracking-widest text-slate-500">CONSOLE MODE • {state.roomId}</div>
+          <div className="text-sm font-black uppercase tracking-widest text-slate-500">CONSOLE MODE • {state.roomId} • ROUND {state.roundNumber}</div>
         </div>
         <div className="flex flex-col items-end">
           <div className="mb-2 text-xl font-black">DIRECTION</div>
@@ -88,10 +102,11 @@ export default function ConsolePage() {
           {state.players.map((player, index) => {
             const isActive = state.currentPlayerIndex === index;
             return (
-              <div key={player.id} className={`flex items-center justify-between rounded-[2rem] border-4 p-6 transition-all duration-300 ${isActive ? 'scale-110 border-white bg-white text-slate-950 shadow-2xl' : 'border-slate-800 bg-slate-900 opacity-40'}`}>
+              <div key={player.id} className={`flex items-center justify-between rounded-[2rem] border-4 p-6 transition-all duration-300 motion-reduce:transition-none ${isActive ? 'scale-110 border-white bg-white text-slate-950 shadow-2xl' : 'border-slate-800 bg-slate-900 opacity-40'}`}>
                 <div>
                   <div className="mb-1 text-xs font-black uppercase tracking-widest opacity-50">{index + 1}. PLAYER</div>
-                  <div className="truncate text-2xl font-black">{player.name}</div>
+                  <div className="flex items-center gap-2 truncate text-2xl font-black"><span className={`h-2 w-2 rounded-full ${player.isConnected ? 'bg-green-500' : 'bg-slate-500'}`} />{player.name}</div>
+                  <div className="text-xs font-bold uppercase tracking-wider opacity-50">{player.wins} wins</div>
                 </div>
                 <div className="text-4xl font-black italic">{player.handCount}</div>
               </div>
@@ -105,11 +120,12 @@ export default function ConsolePage() {
             <div className="mb-12 text-center">
               <div className="mb-2 text-sm font-black uppercase tracking-[0.5em] text-slate-500">CURRENT TURN</div>
               <div className="text-7xl font-black tracking-tighter">{currentPlayer?.name || '—'}</div>
+              <div role="timer" className={`mx-auto mt-5 flex h-20 w-20 items-center justify-center rounded-full border-4 text-3xl font-black tabular-nums ${turnSecondsRemaining(state, nowMs, clockOffsetMs) <= 5 ? 'border-yellow-300 bg-red-600 motion-safe:animate-pulse' : 'border-slate-700 bg-slate-900'}`}>{turnSecondsRemaining(state, nowMs, clockOffsetMs)}</div>
             </div>
             <div className="relative h-[30rem] w-80">
               {state.discardPile.slice(-5).map((card, index) => (
                 <div key={card.id} className="absolute inset-0 transition-all duration-700 ease-out" style={{ transform: `rotate(${(index - 2) * 8 + Math.sin(index) * 5}deg) translate(${(index - 2) * 10}px, ${(index - 2) * 5}px)`, zIndex: index }}>
-                  <Image src={`/cards/${card.filename}`} alt={card.id} width={320} height={480} className="h-full w-full rounded-[2.5rem] border-4 border-white/5 object-contain shadow-2xl" />
+                  <Image src={`/cards/${card.filename}`} alt={describeCard(card)} width={320} height={480} className="h-full w-full rounded-[2.5rem] border-4 border-white/5 object-contain shadow-2xl" />
                 </div>
               ))}
             </div>
@@ -124,11 +140,28 @@ export default function ConsolePage() {
 
       {state.status === 'Finished' && (
         <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950">
-          <div className="mb-8 text-[12rem] animate-bounce">👑</div>
+          <div className="mb-8 text-[12rem] motion-safe:animate-bounce">👑</div>
           <h2 className="mb-4 text-2xl font-black uppercase tracking-[1em] text-yellow-500 opacity-50">WE HAVE A WINNER</h2>
           <div className="mb-12 bg-gradient-to-b from-white to-slate-500 bg-clip-text text-9xl font-black italic tracking-tighter text-transparent">{state.players.find((player) => player.id === state.winnerId)?.name}</div>
+          <div className="flex flex-wrap justify-center gap-4">
+            {[...state.players].sort((left, right) => right.wins - left.wins).map((player) => <span key={player.id} className="rounded-full bg-slate-800 px-6 py-3 text-2xl font-black">{player.name}: {player.wins}</span>)}
+          </div>
         </div>
       )}
     </main>
   );
+}
+
+function turnSecondsRemaining(state: GameState, nowMs: number, clockOffsetMs: number) {
+  if (!state.turnDeadlineAt) return 0;
+  return Math.max(0, Math.ceil((state.turnDeadlineAt - (nowMs + clockOffsetMs)) / 1_000));
+}
+
+function describeCard(card: { color: string; value: string }) {
+  const value = card.value === 'DrawTwo'
+    ? 'Draw Two'
+    : card.value === 'WildDrawFour'
+      ? 'Draw Four'
+      : card.value;
+  return card.color === 'Wild' ? `Wild ${value}`.replace('Wild Wild', 'Wild') : `${card.color} ${value}`;
 }

@@ -9,6 +9,10 @@ const dev = process.env.NODE_ENV !== 'production';
 const port = Number.parseInt(process.env.PORT || '3000', 10);
 const hostname = process.env.HOSTNAME || '0.0.0.0';
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+const configuredTurnDurationMs = Number.parseInt(process.env.TURN_DURATION_MS || '15000', 10);
+const turnDurationMs = Number.isFinite(configuredTurnDurationMs) && configuredTurnDurationMs >= 1_000
+  ? configuredTurnDurationMs
+  : 15_000;
 
 const nextApp = next({ dev, hostname, port });
 const handle = nextApp.getRequestHandler();
@@ -23,7 +27,7 @@ await nextApp.prepare();
 const expressApp = express();
 const httpServer = createServer(expressApp);
 const store = new RedisGameStore(redis);
-const io = attachGameSocketServer(httpServer, { store });
+const io = attachGameSocketServer(httpServer, { store, turnDurationMs });
 
 expressApp.all('/{*splat}', (request, response) => handle(request, response));
 

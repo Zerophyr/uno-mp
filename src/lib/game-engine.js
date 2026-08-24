@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 export const COLORS = ['Red', 'Blue', 'Green', 'Yellow'];
+export const MAX_PLAYERS = 4;
+export const TURN_DURATION_MS = 15_000;
 export const VALUES = [
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
   'Skip', 'Reverse', 'DrawTwo',
@@ -64,6 +66,8 @@ export function createLobby(roomId, host) {
   return {
     roomId,
     status: 'Lobby',
+    maxPlayers: MAX_PLAYERS,
+    roundNumber: 0,
     players: [host],
     deck: [],
     discardPile: [],
@@ -74,19 +78,39 @@ export function createLobby(roomId, host) {
     lastPlayedCard: null,
     pendingDrawPlayerId: null,
     pendingDrawCardId: null,
+    rematchVotes: [],
+    turnDeadlineAt: null,
+    turnDurationMs: TURN_DURATION_MS,
     version: 0,
   };
 }
 
-export function sanitizeState(state, viewerPlayerId = null) {
+export function sanitizeState(state, viewerPlayerId = null, connectedPlayerIds = null) {
+  const rematchVotes = getRematchVotes(state);
   const sanitized = {
     ...state,
+    maxPlayers: state.maxPlayers ?? MAX_PLAYERS,
+    roundNumber: state.roundNumber ?? 0,
+    turnDeadlineAt: state.turnDeadlineAt ?? null,
+    turnDurationMs: state.turnDurationMs ?? TURN_DURATION_MS,
+    serverNow: Date.now(),
     deck: [],
     canPass: state.pendingDrawPlayerId === viewerPlayerId,
+    rematchVoteCount: rematchVotes.length,
+    rematchVotesRequired: requiredRematchVotes(state.players.length),
+    hasVotedRematch: Boolean(viewerPlayerId && rematchVotes.includes(viewerPlayerId)),
+    canVoteRematch: Boolean(
+      viewerPlayerId
+      && state.status === 'Finished'
+      && state.players.length >= 2
+      && state.players.some((player) => player.id === viewerPlayerId)
+    ),
     players: state.players.map((player) => ({
       id: player.id,
       name: player.name,
       isHost: player.isHost,
+      isConnected: connectedPlayerIds ? connectedPlayerIds.has(player.id) : true,
+      wins: player.wins ?? 0,
       hasCalledUno: player.hasCalledUno,
       hand: player.id === viewerPlayerId ? player.hand : [],
       handCount: player.hand.length,
@@ -94,6 +118,7 @@ export function sanitizeState(state, viewerPlayerId = null) {
   };
   delete sanitized.pendingDrawPlayerId;
   delete sanitized.pendingDrawCardId;
+  delete sanitized.rematchVotes;
   return sanitized;
 }
 
@@ -107,15 +132,63 @@ export function canPlayCard(card, state, hand = []) {
   return card.color === state.currentColor || card.value === topCard.value;
 }
 
-export function startGame(state, { random = Math.random, idFactory = randomUUID } = {}) {
+export function startGame(
+  state,
+  {
+    random = Math.random,
+    idFactory = randomUUID,
+    now = Date.now(),
+    turnDurationMs = TURN_DURATION_MS,
+  } = {},
+) {
   if (state.status !== 'Lobby') {
     throw new GameError('GAME_ALREADY_STARTED', 'The game has already started.');
   }
+
+  return beginRound(state, { random, idFactory, now, turnDurationMs });
+}
+
+export function voteRematch(
+  state,
+  playerId,
+  {
+    random = Math.random,
+    idFactory = randomUUID,
+    now = Date.now(),
+    turnDurationMs = state.turnDurationMs ?? TURN_DURATION_MS,
+  } = {},
+) {
+  if (state.status !== 'Finished') {
+    throw new GameError('REMATCH_NOT_AVAILABLE', 'Rematch voting opens when the round is over.');
+  }
+  if (state.players.length < 2) {
+    throw new GameError('NOT_ENOUGH_PLAYERS', 'At least two players are required for another round.');
+  }
+  if (!state.players.some((player) => player.id === playerId)) {
+    throw new GameError('PLAYER_NOT_FOUND', 'This player is no longer in the room.');
+  }
+
+  const rematchVotes = getRematchVotes(state);
+  if (!rematchVotes.includes(playerId)) rematchVotes.push(playerId);
+  state.rematchVotes = rematchVotes;
+
+  if (rematchVotes.length >= requiredRematchVotes(state.players.length)) {
+    beginRound(state, { random, idFactory, now, turnDurationMs });
+  }
+
+  return state;
+}
+
+export function requiredRematchVotes(playerCount) {
+  return Math.floor(playerCount / 2) + 1;
+}
+
+function beginRound(state, { random, idFactory, now, turnDurationMs }) {
   if (state.players.length < 2) {
     throw new GameError('NOT_ENOUGH_PLAYERS', 'At least two players are required.');
   }
-  if (state.players.length > 10) {
-    throw new GameError('TOO_MANY_PLAYERS', 'UNO supports at most ten players.');
+  if (state.players.length > (state.maxPlayers ?? MAX_PLAYERS)) {
+    throw new GameError('TOO_MANY_PLAYERS', `UNO supports at most ${state.maxPlayers ?? MAX_PLAYERS} players in this room.`);
   }
 
   const deck = shuffle(createDeck(idFactory), random);
@@ -137,6 +210,7 @@ export function startGame(state, { random = Math.random, idFactory = randomUUID 
   }
 
   state.status = 'Playing';
+  state.roundNumber = (state.roundNumber ?? 0) + 1;
   state.deck = deck;
   state.discardPile = [initialDiscard];
   state.currentPlayerIndex = 0;
@@ -144,6 +218,8 @@ export function startGame(state, { random = Math.random, idFactory = randomUUID 
   state.currentColor = initialDiscard.color;
   state.winnerId = null;
   state.lastPlayedCard = initialDiscard;
+  state.rematchVotes = [];
+  state.turnDurationMs = turnDurationMs;
   clearPendingDraw(state);
 
   if (initialDiscard.value === 'Skip') {
@@ -157,6 +233,8 @@ export function startGame(state, { random = Math.random, idFactory = randomUUID 
     drawCards(state, state.players[0], 2, random);
     state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
   }
+
+  resetTurnDeadline(state, now);
 
   return state;
 }
@@ -202,6 +280,9 @@ export function playCard(state, playerId, cardId, chosenColor, random = Math.ran
   if (player.hand.length === 0) {
     state.status = 'Finished';
     state.winnerId = playerId;
+    player.wins = (player.wins ?? 0) + 1;
+    state.rematchVotes = [];
+    state.turnDeadlineAt = null;
     return state;
   }
 
@@ -213,6 +294,7 @@ export function playCard(state, playerId, cardId, chosenColor, random = Math.ran
       state.direction *= -1;
       state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
     }
+    resetTurnDeadline(state);
     return state;
   }
 
@@ -224,6 +306,8 @@ export function playCard(state, playerId, cardId, chosenColor, random = Math.ran
     drawCards(state, state.players[state.currentPlayerIndex], drawCount, random);
     state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
   }
+
+  resetTurnDeadline(state);
 
   return state;
 }
@@ -248,6 +332,8 @@ export function drawCard(state, playerId, random = Math.random) {
     state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
   }
 
+  resetTurnDeadline(state);
+
   return state;
 }
 
@@ -258,21 +344,45 @@ export function passTurn(state, playerId) {
   }
   clearPendingDraw(state);
   state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
+  resetTurnDeadline(state);
   return state;
 }
 
-export function removePlayer(state, playerId, random = Math.random) {
+export function expireTurn(state, now = Date.now(), random = Math.random) {
+  if (state.status !== 'Playing') {
+    throw new GameError('GAME_NOT_PLAYING', 'The game is not currently active.');
+  }
+  if (state.turnDeadlineAt && now < state.turnDeadlineAt) {
+    throw new GameError('TURN_TIMER_ACTIVE', 'The current turn still has time remaining.');
+  }
+
+  const player = state.players[state.currentPlayerIndex];
+  if (!player) throw new GameError('PLAYER_NOT_FOUND', 'The current player is no longer in the room.');
+
+  const drawnCard = drawOne(state, random);
+  if (drawnCard) player.hand.push(drawnCard);
+  player.hasCalledUno = false;
+  clearPendingDraw(state);
+  state.currentPlayerIndex = advanceIndex(state, state.currentPlayerIndex);
+  resetTurnDeadline(state, now);
+  return { playerId: player.id, drewCard: Boolean(drawnCard) };
+}
+
+export function removePlayer(state, playerId, random = Math.random, idFactory = randomUUID) {
   const playerIndex = state.players.findIndex((player) => player.id === playerId);
   if (playerIndex === -1) return state;
 
   const [removedPlayer] = state.players.splice(playerIndex, 1);
   state.deck = shuffle([...state.deck, ...removedPlayer.hand], random);
+  state.rematchVotes = getRematchVotes(state).filter((vote) => vote !== playerId);
   if (state.pendingDrawPlayerId === playerId) clearPendingDraw(state);
 
   if (state.players.length === 0) {
     state.status = 'Finished';
     state.winnerId = null;
     state.currentPlayerIndex = 0;
+    state.rematchVotes = [];
+    state.turnDeadlineAt = null;
     return state;
   }
 
@@ -282,7 +392,10 @@ export function removePlayer(state, playerId, random = Math.random) {
     if (state.players.length === 1) {
       state.status = 'Finished';
       state.winnerId = state.players[0].id;
+      state.players[0].wins = (state.players[0].wins ?? 0) + 1;
       state.currentPlayerIndex = 0;
+      state.rematchVotes = [];
+      state.turnDeadlineAt = null;
     } else if (playerIndex < state.currentPlayerIndex) {
       state.currentPlayerIndex -= 1;
     } else if (playerIndex === state.currentPlayerIndex) {
@@ -290,9 +403,27 @@ export function removePlayer(state, playerId, random = Math.random) {
         ? playerIndex % state.players.length
         : (playerIndex - 1 + state.players.length) % state.players.length;
     }
+    resetTurnDeadline(state);
+  }
+
+  if (
+    state.status === 'Finished'
+    && state.players.length >= 2
+    && state.rematchVotes.length >= requiredRematchVotes(state.players.length)
+  ) {
+    beginRound(state, {
+      random,
+      idFactory,
+      now: Date.now(),
+      turnDurationMs: state.turnDurationMs ?? TURN_DURATION_MS,
+    });
   }
 
   return state;
+}
+
+function getRematchVotes(state) {
+  return Array.isArray(state.rematchVotes) ? state.rematchVotes : [];
 }
 
 function requireCurrentPlayer(state, playerId) {
@@ -330,4 +461,10 @@ function drawOne(state, random) {
 function clearPendingDraw(state) {
   state.pendingDrawPlayerId = null;
   state.pendingDrawCardId = null;
+}
+
+function resetTurnDeadline(state, now = Date.now()) {
+  state.turnDeadlineAt = state.status === 'Playing'
+    ? now + (state.turnDurationMs ?? TURN_DURATION_MS)
+    : null;
 }

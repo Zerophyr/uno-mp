@@ -2,23 +2,31 @@ import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 
 import { Server } from 'socket.io';
 import {
   GameError,
+  MAX_PLAYERS,
+  TURN_DURATION_MS,
   callUno,
   createLobby,
   drawCard,
+  expireTurn,
   passTurn,
   playCard,
   removePlayer,
   sanitizeState,
   startGame,
+  voteRematch,
 } from '../lib/game-engine.js';
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ROOM_PATTERN = /^[A-Z0-9]{6}$/;
-const MAX_PLAYERS = 10;
 
 export function attachGameSocketServer(
   httpServer,
-  { store, ioOptions = {}, disconnectGraceMs = 2 * 60 * 1000 },
+  {
+    store,
+    ioOptions = {},
+    disconnectGraceMs = 2 * 60 * 1000,
+    turnDurationMs = TURN_DURATION_MS,
+  },
 ) {
   const io = new Server(httpServer, {
     connectionStateRecovery: {
@@ -28,19 +36,61 @@ export function attachGameSocketServer(
     maxHttpBufferSize: 100_000,
     ...ioOptions,
   });
+  const turnTimers = new Map();
+
+  function scheduleTurnTimeout(roomId, state) {
+    const existingTimer = turnTimers.get(roomId);
+    if (existingTimer) clearTimeout(existingTimer);
+    turnTimers.delete(roomId);
+
+    if (state.status !== 'Playing' || !Number.isFinite(state.turnDeadlineAt)) return;
+    const expectedDeadline = state.turnDeadlineAt;
+    const delay = Math.max(0, expectedDeadline - Date.now());
+    const timer = setTimeout(async () => {
+      turnTimers.delete(roomId);
+      try {
+        const snapshot = await store.get(roomId);
+        if (!snapshot) return;
+        if (snapshot.status !== 'Playing' || snapshot.turnDeadlineAt !== expectedDeadline) {
+          scheduleTurnTimeout(roomId, snapshot);
+          return;
+        }
+
+        const now = Date.now();
+        if (now < expectedDeadline) {
+          scheduleTurnTimeout(roomId, snapshot);
+          return;
+        }
+
+        const { state: updatedState } = await store.update(roomId, (game) => {
+          if (game.status !== 'Playing' || game.turnDeadlineAt !== expectedDeadline) return;
+          expireTurn(game, now);
+        });
+        await broadcastState(roomId, updatedState);
+      } catch (error) {
+        if (error?.code !== 'ROOM_NOT_FOUND') console.error('Turn timer failed:', error);
+      }
+    }, delay);
+    timer.unref();
+    turnTimers.set(roomId, timer);
+  }
 
   async function broadcastState(roomId, state) {
+    scheduleTurnTimeout(roomId, state);
     const sockets = await io.in(roomName(roomId)).fetchSockets();
+    const connectedPlayerIds = new Set(
+      sockets.map((roomSocket) => roomSocket.data.playerId).filter(Boolean),
+    );
     for (const roomSocket of sockets) {
       const viewerId = roomSocket.data.roomId === roomId ? roomSocket.data.playerId || null : null;
-      roomSocket.emit('state-updated', sanitizeState(state, viewerId));
+      roomSocket.emit('state-updated', sanitizeState(state, viewerId, connectedPlayerIds));
     }
   }
 
   io.on('connection', (socket) => {
     if (socket.recovered && socket.data.roomId) {
       void store.get(socket.data.roomId).then((state) => {
-        if (state) socket.emit('state-updated', sanitizeState(state, socket.data.playerId || null));
+        if (state) void broadcastState(socket.data.roomId, state);
       });
     }
 
@@ -72,8 +122,9 @@ export function attachGameSocketServer(
         if (game.status !== 'Lobby') {
           throw new GameError('GAME_ALREADY_STARTED', 'The game has already started.');
         }
-        if (game.players.length >= MAX_PLAYERS) {
-          throw new GameError('ROOM_FULL', 'This room already has ten players.');
+        const maxPlayers = game.maxPlayers ?? MAX_PLAYERS;
+        if (game.players.length >= maxPlayers) {
+          throw new GameError('ROOM_FULL', `This room already has ${maxPlayers} players.`);
         }
         game.players.push(player);
       });
@@ -95,7 +146,7 @@ export function attachGameSocketServer(
       }
 
       await bindPlayer(socket, roomId, playerId);
-      socket.emit('state-updated', sanitizeState(state, playerId));
+      await broadcastState(roomId, state);
       return { session: publicSession(roomId, playerId, sessionToken) };
     });
 
@@ -103,7 +154,7 @@ export function attachGameSocketServer(
       const roomId = parseRoomId(payload?.roomId);
       const state = await requireState(store, roomId);
       await bindWatcher(socket, roomId);
-      socket.emit('state-updated', sanitizeState(state));
+      await broadcastState(roomId, state);
       return { roomId };
     });
 
@@ -114,7 +165,7 @@ export function attachGameSocketServer(
         if (!player?.isHost) {
           throw new GameError('HOST_ONLY', 'Only the host can start the game.');
         }
-        startGame(game);
+        startGame(game, { turnDurationMs });
       });
       await broadcastState(session.roomId, state);
       return {};
@@ -125,6 +176,7 @@ export function attachGameSocketServer(
       const cardId = parseIdentifier(payload?.cardId, 'card ID', 160);
       const chosenColor = payload?.chosenColor;
       const { state } = await store.update(session.roomId, (game) => {
+        requireActiveTurn(game);
         playCard(game, session.playerId, cardId, chosenColor);
       });
       await broadcastState(session.roomId, state);
@@ -134,6 +186,7 @@ export function attachGameSocketServer(
     register(socket, 'draw-card', async () => {
       const session = requireBoundPlayer(socket);
       const { state } = await store.update(session.roomId, (game) => {
+        requireActiveTurn(game);
         drawCard(game, session.playerId);
       });
       await broadcastState(session.roomId, state);
@@ -143,6 +196,7 @@ export function attachGameSocketServer(
     register(socket, 'pass-turn', async () => {
       const session = requireBoundPlayer(socket);
       const { state } = await store.update(session.roomId, (game) => {
+        requireActiveTurn(game);
         passTurn(game, session.playerId);
       });
       await broadcastState(session.roomId, state);
@@ -152,8 +206,42 @@ export function attachGameSocketServer(
     register(socket, 'call-uno', async () => {
       const session = requireBoundPlayer(socket);
       const { state } = await store.update(session.roomId, (game) => {
+        requireActiveTurn(game);
         callUno(game, session.playerId);
       });
+      await broadcastState(session.roomId, state);
+      return {};
+    });
+
+    register(socket, 'vote-rematch', async () => {
+      const session = requireBoundPlayer(socket);
+      const { state } = await store.update(session.roomId, (game) => {
+        voteRematch(game, session.playerId, { turnDurationMs });
+      });
+      await broadcastState(session.roomId, state);
+      return {};
+    });
+
+    register(socket, 'remove-player', async (payload) => {
+      const session = requireBoundPlayer(socket);
+      const targetPlayerId = parseIdentifier(payload?.playerId, 'player ID');
+      if (targetPlayerId === session.playerId) {
+        throw new GameError('INVALID_TARGET', 'Use Leave room to remove yourself.');
+      }
+
+      const { state } = await store.update(session.roomId, (game) => {
+        if (game.status !== 'Lobby') {
+          throw new GameError('LOBBY_ONLY', 'Players can only be removed before the game starts.');
+        }
+        const player = game.players.find((candidate) => candidate.id === session.playerId);
+        if (!player?.isHost) throw new GameError('HOST_ONLY', 'Only the host can remove a player.');
+        if (!game.players.some((candidate) => candidate.id === targetPlayerId)) {
+          throw new GameError('PLAYER_NOT_FOUND', 'This player is no longer in the room.');
+        }
+        removePlayer(game, targetPlayerId);
+      });
+
+      await removePlayerSockets(io, session.roomId, targetPlayerId);
       await broadcastState(session.roomId, state);
       return {};
     });
@@ -175,8 +263,20 @@ export function attachGameSocketServer(
       const playerId = socket.data.playerId;
       if (!roomId || !playerId) return;
 
+      void store.get(roomId).then((state) => {
+        if (state) return broadcastState(roomId, state);
+        return undefined;
+      }).catch((error) => console.error('Presence broadcast failed:', error));
+
       setTimeout(() => {
-        void removeDisconnectedPlayer(io, store, roomId, playerId, broadcastState);
+        void removeDisconnectedPlayer(
+          io,
+          store,
+          roomId,
+          playerId,
+          broadcastState,
+          disconnectGraceMs,
+        );
       }, disconnectGraceMs).unref();
     });
   });
@@ -184,15 +284,49 @@ export function attachGameSocketServer(
   return io;
 }
 
-async function removeDisconnectedPlayer(io, store, roomId, playerId, broadcastState) {
+async function removeDisconnectedPlayer(
+  io,
+  store,
+  roomId,
+  playerId,
+  broadcastState,
+  disconnectGraceMs,
+) {
   const sockets = await io.in(roomName(roomId)).fetchSockets();
   if (sockets.some((socket) => socket.data.playerId === playerId)) return;
 
   try {
+    const currentState = await store.get(roomId);
+    if (!currentState) return;
+    const anyPlayerConnected = sockets.some((socket) => Boolean(socket.data.playerId));
+    if (currentState.status === 'Playing' && anyPlayerConnected) {
+      setTimeout(() => {
+        void removeDisconnectedPlayer(
+          io,
+          store,
+          roomId,
+          playerId,
+          broadcastState,
+          disconnectGraceMs,
+        );
+      }, Math.min(disconnectGraceMs, 30_000)).unref();
+      return;
+    }
+
     const { state } = await store.update(roomId, (game) => removePlayer(game, playerId));
     await broadcastState(roomId, state);
   } catch (error) {
     if (error?.code !== 'ROOM_NOT_FOUND') console.error('Disconnect cleanup failed:', error);
+  }
+}
+
+async function removePlayerSockets(io, roomId, playerId) {
+  const sockets = await io.in(roomName(roomId)).fetchSockets();
+  for (const playerSocket of sockets.filter((candidate) => candidate.data.playerId === playerId)) {
+    playerSocket.emit('removed-from-room', { message: 'The host removed you from the lobby.' });
+    await playerSocket.leave(roomName(roomId));
+    playerSocket.data.roomId = null;
+    playerSocket.data.playerId = null;
   }
 }
 
@@ -238,6 +372,12 @@ function requireBoundPlayer(socket) {
   return { roomId: socket.data.roomId, playerId: socket.data.playerId };
 }
 
+function requireActiveTurn(state) {
+  if (state.status === 'Playing' && state.turnDeadlineAt && Date.now() >= state.turnDeadlineAt) {
+    throw new GameError('TURN_EXPIRED', 'That turn has already expired.');
+  }
+}
+
 async function requireState(store, roomId) {
   const state = await store.get(roomId);
   if (!state) throw new GameError('ROOM_NOT_FOUND', 'Room not found.');
@@ -256,6 +396,7 @@ function createPlayer(name, isHost, session) {
     hand: [],
     hasCalledUno: false,
     isHost,
+    wins: 0,
     sessionHash: session.hash,
   };
 }
